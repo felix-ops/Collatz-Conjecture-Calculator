@@ -72,6 +72,22 @@ def load_collatz_library(custom_path: str | None = None) -> ctypes.CDLL | None:
                 lib.collatz_steps_bigint.argtypes = [ctypes.c_char_p]
                 lib.collatz_steps_bigint.restype = ctypes.c_uint64
 
+                if hasattr(lib, "collatz_compute_batch_fast"):
+                    lib.collatz_compute_batch_fast.argtypes = [
+                        ctypes.c_uint64,
+                        ctypes.c_uint64,
+                        ctypes.c_uint64,
+                        ctypes.POINTER(ctypes.c_uint64),
+                        ctypes.POINTER(ctypes.c_uint64),
+                        ctypes.c_uint64,
+                        ctypes.POINTER(ctypes.c_uint64),
+                        ctypes.POINTER(ctypes.c_uint64),
+                        ctypes.POINTER(ctypes.c_uint64),
+                        ctypes.POINTER(ctypes.c_uint64),
+                        ctypes.POINTER(ctypes.c_uint64),
+                    ]
+                    lib.collatz_compute_batch_fast.restype = None
+
                 if hasattr(lib, "collatz_compute_batch_bigint"):
                     lib.collatz_compute_batch_bigint.argtypes = [
                         ctypes.c_char_p,
@@ -351,7 +367,17 @@ class RealTimeCollatzRunner:
         current_n = self.start_num
 
         if self.lib is not None:
-            # Pre-allocate reusable C buffer to eliminate per-batch allocation churn
+            use_fast = hasattr(self.lib, "collatz_compute_batch_fast")
+            MAX_QUAL = 65536
+            qual_nums = (ctypes.c_uint64 * MAX_QUAL)()
+            qual_steps = (ctypes.c_uint64 * MAX_QUAL)()
+            qual_count = ctypes.c_uint64(0)
+            out_sum = ctypes.c_uint64(0)
+            out_max_steps = ctypes.c_uint64(0)
+            out_max_num = ctypes.c_uint64(0)
+            out_last_steps = ctypes.c_uint64(0)
+
+            # Fallback buffer for legacy batch or BigInt
             c_buffer = (ctypes.c_uint64 * self.batch_size)()
             allocated_batch_size = self.batch_size
 
@@ -368,71 +394,135 @@ class RealTimeCollatzRunner:
                 if chunk_len <= 0:
                     break
 
-                # Reallocate only if chunk_len changed (e.g. final batch before end_num)
-                if chunk_len != allocated_batch_size:
-                    c_buffer = (ctypes.c_uint64 * chunk_len)()
-                    allocated_batch_size = chunk_len
-
-                # Check 64-bit bounds
                 U64_MAX = 18446744073709551615
-                if current_n + chunk_len < U64_MAX:
-                    self.lib.collatz_compute_batch(current_n, chunk_len, c_buffer)
+                if use_fast and (current_n + chunk_len < U64_MAX):
+                    with self.heap_lock:
+                        heap_len = len(self.top_heap)
+                        heap_min = self.top_heap[0][0] if heap_len >= self.csv_limit else 0
+
+                    threshold = min(self.record_max_steps + 1, heap_min) if heap_len >= self.csv_limit else 0
+
+                    self.lib.collatz_compute_batch_fast(
+                        current_n,
+                        chunk_len,
+                        threshold,
+                        qual_nums,
+                        qual_steps,
+                        MAX_QUAL,
+                        ctypes.byref(qual_count),
+                        ctypes.byref(out_sum),
+                        ctypes.byref(out_max_steps),
+                        ctypes.byref(out_max_num),
+                        ctypes.byref(out_last_steps),
+                    )
+
+                    chunk_sum = out_sum.value
+                    chunk_max_steps = out_max_steps.value
+                    chunk_max_num = out_max_num.value
+                    last_step_val = out_last_steps.value
+                    n_qual = qual_count.value
+
+                    self.total_processed += chunk_len
+                    self.sum_steps += chunk_sum
+                    self.last_n = current_n + chunk_len - 1
+                    self.last_steps = last_step_val
+                    if chunk_max_steps > self.max_steps:
+                        self.max_steps = chunk_max_steps
+                        self.max_num = chunk_max_num
+
+                    if n_qual > 0:
+                        # Option A: Global Top-1000 Leaderboard Update
+                        with self.heap_lock:
+                            added = False
+                            for idx in range(n_qual):
+                                q_num = qual_nums[idx]
+                                q_step = qual_steps[idx]
+                                if len(self.top_heap) < self.csv_limit:
+                                    heapq.heappush(self.top_heap, (q_step, q_num))
+                                    added = True
+                                elif q_step > self.top_heap[0][0]:
+                                    heapq.heappushpop(self.top_heap, (q_step, q_num))
+                                    added = True
+                            if added:
+                                self.csv_dirty = True
+
+                        # Option B: Unlimited Record-Breakers
+                        if chunk_max_steps > self.record_max_steps:
+                            with self.records_lock:
+                                candidates = sorted(
+                                    [(qual_nums[idx], qual_steps[idx]) for idx in range(n_qual)],
+                                    key=lambda x: x[0]
+                                )
+                                for q_num, q_step in candidates:
+                                    if q_step > self.record_max_steps:
+                                        self.record_max_steps = q_step
+                                        self.record_breakers.append((q_num, q_step))
+                                        self.records_dirty = True
+
                 else:
-                    start_str = str(current_n).encode("ascii")
-                    if hasattr(self.lib, "collatz_compute_batch_bigint"):
-                        self.lib.collatz_compute_batch_bigint(start_str, chunk_len, c_buffer)
+                    # Reallocate only if chunk_len changed (e.g. final batch before end_num)
+                    if chunk_len != allocated_batch_size:
+                        c_buffer = (ctypes.c_uint64 * chunk_len)()
+                        allocated_batch_size = chunk_len
+
+                    if current_n + chunk_len < U64_MAX:
+                        self.lib.collatz_compute_batch(current_n, chunk_len, c_buffer)
                     else:
-                        for i in range(chunk_len):
-                            c_buffer[i] = self.lib.collatz_steps_bigint(str(current_n + i).encode("ascii"))
+                        start_str = str(current_n).encode("ascii")
+                        if hasattr(self.lib, "collatz_compute_batch_bigint"):
+                            self.lib.collatz_compute_batch_bigint(start_str, chunk_len, c_buffer)
+                        else:
+                            for i in range(chunk_len):
+                                c_buffer[i] = self.lib.collatz_steps_bigint(str(current_n + i).encode("ascii"))
 
-                steps_list = list(c_buffer)
+                    steps_list = list(c_buffer)
 
-                chunk_max_steps = 0
-                chunk_max_num = current_n
-                chunk_sum = sum(steps_list)
+                    chunk_max_steps = 0
+                    chunk_max_num = current_n
+                    chunk_sum = sum(steps_list)
 
-                for i, s in enumerate(steps_list):
-                    if s > chunk_max_steps:
-                        chunk_max_steps = s
-                        chunk_max_num = current_n + i
+                    for i, s in enumerate(steps_list):
+                        if s > chunk_max_steps:
+                            chunk_max_steps = s
+                            chunk_max_num = current_n + i
 
-                # Direct thread-safe cumulative stat updates
-                self.total_processed += chunk_len
-                self.sum_steps += chunk_sum
-                self.last_n = current_n + chunk_len - 1
-                self.last_steps = steps_list[-1]
-                if chunk_max_steps > self.max_steps:
-                    self.max_steps = chunk_max_steps
-                    self.max_num = chunk_max_num
+                    # Direct thread-safe cumulative stat updates
+                    self.total_processed += chunk_len
+                    self.sum_steps += chunk_sum
+                    self.last_n = current_n + chunk_len - 1
+                    self.last_steps = steps_list[-1]
+                    if chunk_max_steps > self.max_steps:
+                        self.max_steps = chunk_max_steps
+                        self.max_num = chunk_max_num
 
-                # Option A: Global Top-1000 Leaderboard Update
-                with self.heap_lock:
-                    heap_len = len(self.top_heap)
-                    min_thresh = self.top_heap[0][0] if heap_len >= self.csv_limit else 0
-                    if heap_len < self.csv_limit or chunk_max_steps > min_thresh:
-                        added = False
-                        for i, s in enumerate(steps_list):
-                            n = current_n + i
-                            if len(self.top_heap) < self.csv_limit:
-                                heapq.heappush(self.top_heap, (s, n))
-                                added = True
-                                if len(self.top_heap) == self.csv_limit:
+                    # Option A: Global Top-1000 Leaderboard Update
+                    with self.heap_lock:
+                        heap_len = len(self.top_heap)
+                        min_thresh = self.top_heap[0][0] if heap_len >= self.csv_limit else 0
+                        if heap_len < self.csv_limit or chunk_max_steps > min_thresh:
+                            added = False
+                            for i, s in enumerate(steps_list):
+                                n = current_n + i
+                                if len(self.top_heap) < self.csv_limit:
+                                    heapq.heappush(self.top_heap, (s, n))
+                                    added = True
+                                    if len(self.top_heap) == self.csv_limit:
+                                        min_thresh = self.top_heap[0][0]
+                                elif s > min_thresh:
+                                    heapq.heappushpop(self.top_heap, (s, n))
                                     min_thresh = self.top_heap[0][0]
-                            elif s > min_thresh:
-                                heapq.heappushpop(self.top_heap, (s, n))
-                                min_thresh = self.top_heap[0][0]
-                                added = True
-                        if added:
-                            self.csv_dirty = True
+                                    added = True
+                            if added:
+                                self.csv_dirty = True
 
-                # Option B: Unlimited Record-Breakers
-                if chunk_max_steps > self.record_max_steps:
-                    with self.records_lock:
-                        for i, s in enumerate(steps_list):
-                            if s > self.record_max_steps:
-                                self.record_max_steps = s
-                                self.record_breakers.append((current_n + i, s))
-                                self.records_dirty = True
+                    # Option B: Unlimited Record-Breakers
+                    if chunk_max_steps > self.record_max_steps:
+                        with self.records_lock:
+                            for i, s in enumerate(steps_list):
+                                if s > self.record_max_steps:
+                                    self.record_max_steps = s
+                                    self.record_breakers.append((current_n + i, s))
+                                    self.records_dirty = True
 
                 # Periodic auto-save every 2 seconds
                 now_t = time.time()
@@ -763,8 +853,8 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=25000,
-        help="In-memory calculation batch size (default: 25000)"
+        default=100000,
+        help="In-memory calculation batch size (default: 100000)"
     )
     parser.add_argument(
         "--refresh-rate",

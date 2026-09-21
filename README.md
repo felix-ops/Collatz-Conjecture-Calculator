@@ -43,14 +43,14 @@ The native C++ acceleration engine is located in the `cpp/` directory:
 - **`cpp/BigInt.hpp`**: Header-only arbitrary-precision integer library.
 
 ### GCC / G++ (MinGW-w64)
-From the project root directory, run:
+From the project root directory, run (optimized with native CPU instructions):
 ```bash
-g++ -O3 -shared -fopenmp -std=c++20 cpp/collatz_dll.cpp -o collatz.dll
+g++ -O3 -shared -fopenmp -std=c++20 -march=native -mbmi -mbmi2 cpp/collatz_dll.cpp -o collatz.dll
 ```
 
 *(Alternatively, if running from inside the `cpp/` folder):*
 ```bash
-g++ -O3 -shared -fopenmp -std=c++20 collatz_dll.cpp -o ../collatz.dll
+g++ -O3 -shared -fopenmp -std=c++20 -march=native -mbmi -mbmi2 collatz_dll.cpp -o ../collatz.dll
 ```
 
 ### MSVC (Visual Studio)
