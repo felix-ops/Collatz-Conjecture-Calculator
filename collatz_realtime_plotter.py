@@ -88,14 +88,6 @@ def load_collatz_library(custom_path: str | None = None) -> ctypes.CDLL | None:
                     ]
                     lib.collatz_compute_batch_fast.restype = None
 
-                if hasattr(lib, "collatz_set_watchdog_limit"):
-                    lib.collatz_set_watchdog_limit.argtypes = [ctypes.c_uint64]
-                    lib.collatz_set_watchdog_limit.restype = None
-
-                if hasattr(lib, "collatz_get_watchdog_limit"):
-                    lib.collatz_get_watchdog_limit.argtypes = []
-                    lib.collatz_get_watchdog_limit.restype = ctypes.c_uint64
-
                 if hasattr(lib, "collatz_compute_batch_bigint"):
                     lib.collatz_compute_batch_bigint.argtypes = [
                         ctypes.c_char_p,
@@ -163,7 +155,6 @@ class RealTimeCollatzRunner:
         checkpoint_path: Path | None = None,
         batch_size: int = 25000,
         csv_limit: int = 1000,
-        watchdog_limit: int = 10000000,
     ):
         self.lib = lib
         self.exe_path = exe_path
@@ -173,16 +164,6 @@ class RealTimeCollatzRunner:
         self.checkpoint_path = checkpoint_path or (self.csv_path.parent / "collatz_checkpoint.txt")
         self.batch_size = max(100, batch_size)
         self.csv_limit = max(1, csv_limit)
-        self.watchdog_limit = max(1000, watchdog_limit)
-        self.suspect_found = False
-        self.suspect_info = None
-        self.suspect_path = self.csv_path.parent / "collatz_suspect_found.txt"
-
-        if self.lib and hasattr(self.lib, "collatz_set_watchdog_limit"):
-            try:
-                self.lib.collatz_set_watchdog_limit(self.watchdog_limit)
-            except Exception:
-                pass
 
         # Threading controls
         self.stop_event = threading.Event()
@@ -376,30 +357,6 @@ class RealTimeCollatzRunner:
             except Exception:
                 pass
 
-    def trigger_suspect_alert(self, suspect_n: int, steps: int):
-        """Halts computation, logs suspect counterexample, and alerts the user."""
-        self.suspect_found = True
-        self.suspect_info = (suspect_n, steps)
-        self.pause_event.clear()  # Pause worker thread immediately
-        self.save_csv()
-        self.save_records_csv()
-        self.save_checkpoint()
-        try:
-            with open(self.suspect_path, "w", encoding="utf-8") as f:
-                f.write("=" * 74 + "\n")
-                f.write(" [!] POTENTIAL COLLATZ COUNTEREXAMPLE / INFINITE LOOP DETECTED!\n")
-                f.write("=" * 74 + "\n\n")
-                f.write(f"Timestamp:              {time.ctime()}\n")
-                f.write(f"Suspect Number (n):     {suspect_n}\n")
-                f.write(f"Number of Digits:       {len(str(suspect_n))}\n")
-                f.write(f"Watchdog Step Limit:    {self.watchdog_limit:,} steps\n")
-                f.write(f"Status:                 Did NOT reach 1 within {self.watchdog_limit:,} steps.\n\n")
-                f.write("This number represents a potential non-trivial cycle (loop)\n")
-                f.write("or an infinitely divergent trajectory.\n")
-                f.write("=" * 74 + "\n")
-        except Exception as e:
-            print(f"[!] Warning writing suspect file: {e}")
-
     def start_worker(self):
         """Launches the background computation thread."""
         self.worker_thread = threading.Thread(target=self._produce_numbers, daemon=True)
@@ -465,11 +422,6 @@ class RealTimeCollatzRunner:
                     last_step_val = out_last_steps.value
                     n_qual = qual_count.value
 
-                    WATCHDOG_TRIGGERED = 18446744073709551615
-                    if chunk_max_steps >= WATCHDOG_TRIGGERED or chunk_max_steps >= self.watchdog_limit:
-                        self.trigger_suspect_alert(chunk_max_num, chunk_max_steps)
-                        break
-
                     self.total_processed += chunk_len
                     self.sum_steps += chunk_sum
                     self.last_n = current_n + chunk_len - 1
@@ -530,16 +482,9 @@ class RealTimeCollatzRunner:
                     chunk_sum = sum(steps_list)
 
                     for i, s in enumerate(steps_list):
-                        if s >= WATCHDOG_TRIGGERED or s >= self.watchdog_limit:
-                            suspect_n = current_n + i
-                            self.trigger_suspect_alert(suspect_n, s)
-                            break
                         if s > chunk_max_steps:
                             chunk_max_steps = s
                             chunk_max_num = current_n + i
-
-                    if self.suspect_found:
-                        break
 
                     # Direct thread-safe cumulative stat updates
                     self.total_processed += chunk_len
@@ -718,6 +663,16 @@ def make_row(content: str, width: int = 74, c_border: str = "\033[1;36m") -> str
     return f"{c_border}| \033[0m{content}{' ' * pad} {c_border}|\033[0m"
 
 
+def format_huge_int(n: int, max_digits: int = 18) -> str:
+    """Formats an arbitrary-length integer cleanly without float overflow or box wrapping."""
+    s = str(n)
+    if len(s) <= max_digits:
+        return f"{n:,}"
+    exp = len(s) - 1
+    short_str = f"{s[:6]}...{s[-4:]}"
+    return f"{short_str} (~{s[0]}.{s[1:3]}e+{exp})"
+
+
 def start_realtime_monitor(runner: RealTimeCollatzRunner, refresh_rate: int = 10):
     """Real-time terminal dashboard with memory, process, and mathematical metrics."""
     runner.start_worker()
@@ -808,40 +763,24 @@ def start_realtime_monitor(runner: RealTimeCollatzRunner, refresh_rate: int = 10
                 make_row(f"{C_GRAY}Elapsed Time:{C_RESET} {C_WHITE}{format_seconds(elapsed_s)}{C_RESET}  |  {C_GRAY}Batch Size:{C_RESET} {C_WHITE}{runner.batch_size:,} nums/batch{C_RESET}", width=w),
                 divider_single,
                 make_row(f"{C_BOLD}{C_YELLOW}PROGRESS & NUMERICAL STATISTICS{C_RESET}", width=w),
-                make_row(f"  {C_GRAY}Current Number (n):{C_RESET}     {C_WHITE}{C_BOLD}{runner.last_n:,}{C_RESET} {C_GRAY}(~{runner.last_n:.2e}){C_RESET}", width=w),
+                make_row(f"  {C_GRAY}Current Number (n):{C_RESET}     {C_WHITE}{C_BOLD}{format_huge_int(runner.last_n)}{C_RESET}", width=w),
                 make_row(f"  {C_GRAY}Last Stopping Time:{C_RESET}     {C_WHITE}{runner.last_steps} steps{C_RESET}", width=w),
                 make_row(f"  {C_GRAY}Total Evaluated:{C_RESET}        {C_WHITE}{runner.total_processed:,} numbers{C_RESET}", width=w),
                 make_row(f"  {C_GRAY}Average Steps to 1:{C_RESET}     {C_WHITE}{avg_steps:.2f} steps{C_RESET}", width=w),
                 make_row(f"  {C_GRAY}Throughput Speed:{C_RESET}       {C_GREEN}{C_BOLD}{runner.current_rate:,.0f} nums/sec{C_RESET} {C_GRAY}(Overall Avg: {avg_speed:,.0f}){C_RESET}", width=w),
                 divider_single,
                 make_row(f"{C_BOLD}{C_YELLOW}RECORDS & MILESTONES{C_RESET}", width=w),
-                make_row(f"  {C_GRAY}All-Time Peak Steps:{C_RESET}    {C_YELLOW}{C_BOLD}{runner.max_steps} steps{C_RESET} {C_GRAY}(at n = {runner.max_num:,}){C_RESET}", width=w),
+                make_row(f"  {C_GRAY}All-Time Peak Steps:{C_RESET}    {C_YELLOW}{C_BOLD}{runner.max_steps} steps{C_RESET} {C_GRAY}(at n = {format_huge_int(runner.max_num)}){C_RESET}", width=w),
                 make_row(f"  {C_GRAY}Record-Breakers (Opt B):{C_RESET}{C_GREEN}{C_BOLD} {rec_count:,} milestones found{C_RESET} {C_GRAY}(unlimited){C_RESET}", width=w),
-                make_row(f"  {C_GRAY}Latest Milestone:{C_RESET}       {C_WHITE}n = {latest_rec[0]:,} -> {latest_rec[1]} steps{C_RESET}", width=w),
+                make_row(f"  {C_GRAY}Latest Milestone:{C_RESET}       {C_WHITE}n = {format_huge_int(latest_rec[0])} -> {latest_rec[1]} steps{C_RESET}", width=w),
                 make_row(f"  {C_GRAY}Top 1k Cutoff (Opt A):{C_RESET}  {C_WHITE}>= {top_cutoff} steps{C_RESET} {C_GRAY}(min steps for Top 1,000){C_RESET}", width=w),
                 divider_single,
                 make_row(f"{C_BOLD}{C_YELLOW}CSV PERSISTENCE & STORAGE{C_RESET}", width=w),
                 make_row(f"  {C_GRAY}Option A (Top 1K):{C_RESET}      {C_WHITE}{top_count:,} / {runner.csv_limit:,} records -> {runner.csv_path.name}{C_RESET}", width=w),
                 make_row(f"  {C_GRAY}Option B (Milestones):{C_RESET}  {C_WHITE}{rec_count:,} records (all)      -> {runner.records_csv_path.name}{C_RESET}", width=w),
                 make_row(f"  {C_GRAY}Auto-Save Interval:{C_RESET}     {C_GREEN}Active (every 2.0s){C_RESET}", width=w),
+                divider_double
             ]
-
-            if runner.suspect_found and runner.suspect_info:
-                suspect_n, suspect_steps = runner.suspect_info
-                sys.stdout.write("\a")  # Alert bell
-                s_str = str(suspect_n)
-                display_num = s_str if len(s_str) <= 45 else (s_str[:22] + "..." + s_str[-20:])
-                box.extend([
-                    divider_double,
-                    make_row(f"{C_BOLD}{C_RED} [!] WATCHDOG ALERT: POTENTIAL COUNTEREXAMPLE / LOOP DETECTED! [!] {C_RESET}", width=w),
-                    divider_single,
-                    make_row(f"  {C_YELLOW}Suspect Number (n):{C_RESET} {C_WHITE}{display_num}{C_RESET}", width=w),
-                    make_row(f"  {C_YELLOW}Status:{C_RESET}             {C_WHITE}Exceeded {runner.watchdog_limit:,} steps without reaching 1!{C_RESET}", width=w),
-                    make_row(f"  {C_YELLOW}Action Taken:{C_RESET}       {C_WHITE}Engine PAUSED. Saved to collatz_suspect_found.txt{C_RESET}", width=w),
-                    divider_double,
-                ])
-            else:
-                box.append(divider_double)
 
             # In-place overwrite with \033[H and \033[K
             sys.stdout.write("\033[H" + "\n".join(line + "\033[K" for line in box) + "\n")
@@ -858,13 +797,10 @@ def start_realtime_monitor(runner: RealTimeCollatzRunner, refresh_rate: int = 10
         sys.stdout.write("\033[?25h\n")
         sys.stdout.flush()
         runner.stop()
-        if runner.suspect_found and runner.suspect_info:
-            print(f"\n{C_RED}[!!!] CRITICAL: Suspect counterexample number was found: {runner.suspect_info[0]}{C_RESET}")
-            print(f"      Full report generated at: {runner.suspect_path.resolve()}\n")
         print(f"\n[+] Monitor stopped. Successfully saved:")
         print(f"    - Option A (Top Leaderboard): {len(runner.top_heap):,} records -> {runner.csv_path.name}")
         print(f"    - Option B (Record-Breakers): {len(runner.record_breakers):,} records -> {runner.records_csv_path.name}")
-        print(f"    - Checkpoint:                 Last n = {runner.last_n:,} -> {runner.checkpoint_path.name}\n")
+        print(f"    - Checkpoint:                 Last n = {format_huge_int(runner.last_n, max_digits=24)} -> {runner.checkpoint_path.name}\n")
 
 
 def main():
@@ -935,12 +871,6 @@ def main():
         type=int,
         default=10,
         help="Terminal dashboard update rate in Hz (default: 10)"
-    )
-    parser.add_argument(
-        "--watchdog-limit",
-        type=int,
-        default=10000000,
-        help="Maximum allowable steps before halting on potential loop / counterexample (default: 10000000)"
     )
 
     args = parser.parse_args()
@@ -1016,8 +946,7 @@ def main():
         records_csv_path=records_csv_path,
         checkpoint_path=checkpoint_path,
         batch_size=args.batch_size,
-        csv_limit=args.csv_limit,
-        watchdog_limit=args.watchdog_limit
+        csv_limit=args.csv_limit
     )
 
     start_realtime_monitor(runner, refresh_rate=args.refresh_rate)
