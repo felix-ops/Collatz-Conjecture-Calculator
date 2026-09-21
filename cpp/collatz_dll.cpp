@@ -1,7 +1,6 @@
 #include <cstdint>
 #include <bit>
 #include <string_view>
-#include <atomic>
 #include "BigInt.hpp"
 
 #if defined(_WIN32)
@@ -20,22 +19,9 @@ using uint128 = uint64_t;
 // intermediate Collatz values are mathematically guaranteed never to exceed 2^64-1.
 constexpr uint64_t FAST_PATH_LIMIT = 10000000000000000ULL;
 
-// Watchdog sentinel returned when step count exceeds the configured limit
-constexpr uint64_t WATCHDOG_TRIGGERED = 0xFFFFFFFFFFFFFFFFULL; // 2^64 - 1
-inline std::atomic<uint64_t> g_watchdog_limit{10000000ULL};     // Default: 10 Million steps
-
-COLLATZ_API void collatz_set_watchdog_limit(uint64_t limit) {
-    g_watchdog_limit.store(limit > 0 ? limit : 10000000ULL, std::memory_order_relaxed);
-}
-
-COLLATZ_API uint64_t collatz_get_watchdog_limit() {
-    return g_watchdog_limit.load(std::memory_order_relaxed);
-}
-
 // 1. Ultra-fast Branchless Odd Pipeline (Zero branch mispredictions, native BMI tzcnt)
 inline uint64_t collatz_steps_branchless_odd(uint64_t n) noexcept {
     if (n <= 1) return 0;
-    const uint64_t max_steps = g_watchdog_limit.load(std::memory_order_relaxed);
     int tz = std::countr_zero(n);
     n >>= tz;
     uint64_t steps = tz;
@@ -44,9 +30,6 @@ inline uint64_t collatz_steps_branchless_odd(uint64_t n) noexcept {
         int z = std::countr_zero(next_n);
         n = next_n >> z;
         steps += 1 + z;
-        if (steps >= max_steps) [[unlikely]] {
-            return WATCHDOG_TRIGGERED;
-        }
     }
     return steps;
 }
@@ -54,7 +37,6 @@ inline uint64_t collatz_steps_branchless_odd(uint64_t n) noexcept {
 // 2. Guarded 64-bit/128-bit Safe Loop (For high ranges n >= 10^16 up to 2^64-1)
 inline uint64_t collatz_steps_safe_u64(uint64_t n) noexcept {
     if (n <= 1) return 0;
-    const uint64_t max_steps = g_watchdog_limit.load(std::memory_order_relaxed);
     uint64_t steps = 0;
     while (n > 1) {
         if ((n & 1ULL) == 0ULL) {
@@ -70,16 +52,12 @@ inline uint64_t collatz_steps_safe_u64(uint64_t n) noexcept {
             }
             steps++;
         }
-        if (steps >= max_steps) [[unlikely]] {
-            return WATCHDOG_TRIGGERED;
-        }
     }
     return steps;
 }
 
 inline uint64_t collatz_steps_bigint_impl(BigInt n) {
     if (n.is_one() || n.is_zero()) return 0;
-    const uint64_t max_steps = g_watchdog_limit.load(std::memory_order_relaxed);
     uint64_t steps = 0;
     while (!n.is_one() && !n.is_zero()) {
         if (n.is_even()) {
@@ -89,9 +67,6 @@ inline uint64_t collatz_steps_bigint_impl(BigInt n) {
         } else {
             n.multiply_by_3_add_1();
             steps++;
-        }
-        if (steps >= max_steps) [[unlikely]] {
-            return WATCHDOG_TRIGGERED;
         }
     }
     return steps;
@@ -181,14 +156,6 @@ inline void collatz_compute_batch_fast_impl(
         for (int64_t i = 0; i < static_cast<int64_t>(count); ++i) {
             uint64_t cur_n = start + static_cast<uint64_t>(i);
             uint64_t s = step_fn(cur_n);
-            if (s == WATCHDOG_TRIGGERED) [[unlikely]] {
-                #pragma omp critical
-                {
-                    global_max_steps = WATCHDOG_TRIGGERED;
-                    global_max_num = cur_n;
-                }
-                continue;
-            }
             local_sum += s;
             if (s > local_max_steps) {
                 local_max_steps = s;
