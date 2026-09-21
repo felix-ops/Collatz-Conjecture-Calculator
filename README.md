@@ -17,6 +17,9 @@ A high-performance, multithreaded engine and live terminal monitor for exploring
 - **Automatic Checkpointing & Resuming**:
   - Automatically tracks the last processed number in `collatz_checkpoint.txt`.
   - Resume anytime seamlessly without duplicate calculations or breaking previous CSV records.
+- **Counterexample & Loop Watchdog Alert**:
+  - Configurable step-cap watchdog (default: 10,000,000 steps).
+  - If a number exceeds the limit without converging to 1, the engine immediately pauses, sounds an alarm, and logs the suspect number and timestamp to `collatz_suspect_found.txt`.
 - **Interactive Console Controls**: Non-blocking keyboard hotkeys for pausing, resuming, force-saving, and exiting.
 
 ---
@@ -127,5 +130,6 @@ While the terminal dashboard is running, you can press:
 | `--csv` | `str` | `collatz_top_steps.csv` | Output file for Option A Top Leaderboard |
 | `--records-csv` | `str` | `collatz_record_breakers.csv` | Output file for Option B Record-Breakers |
 | `--csv-limit` | `int` | `1000` | Max records retained in Option A Leaderboard |
-| `--batch-size` | `int` | `25000` | In-memory OpenMP calculation batch size |
+| `--batch-size` | `int` | `100000` | In-memory OpenMP calculation batch size |
 | `--refresh-rate` | `int` | `10` | Terminal dashboard update frequency in Hz |
+| `--watchdog-limit` | `int` | `10000000` | Maximum steps before halting on potential counterexample / loop |
