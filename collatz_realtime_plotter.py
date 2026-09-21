@@ -744,6 +744,12 @@ def main():
         help="Path for Option B record-breakers CSV output (default: collatz_record_breakers.csv)"
     )
     parser.add_argument(
+        "--csv-limit",
+        type=int,
+        default=1000,
+        help="Maximum number of highest-step records to retain in Option A CSV (default: 1000)"
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="Resume computation from the last saved checkpoint"
