@@ -1,6 +1,10 @@
 import os
 import sys
 
+# Remove limit on integer string conversion for arbitrary large numbers / BigInts (Python 3.11+)
+if hasattr(sys, "set_int_max_str_digits"):
+    sys.set_int_max_str_digits(0)
+
 # Ensure UTF-8 output encoding on Windows consoles
 if sys.platform == "win32":
     try:
@@ -885,11 +889,13 @@ def main():
         if checkpoint_path.is_file() and checkpoint_path.stat().st_size > 0:
             try:
                 with open(checkpoint_path, "r", encoding="utf-8") as f:
-                    val = int(f.read().strip())
-                    if val > 0:
-                        resumed_n = val + 1
-            except Exception:
-                pass
+                    content = f.read().strip()
+                    if content:
+                        val = int(content)
+                        if val > 0:
+                            resumed_n = val + 1
+            except Exception as e:
+                print(f"[!] Warning: Failed to read checkpoint from {checkpoint_path}: {e}")
         if resumed_n is None and records_csv_path.is_file() and records_csv_path.stat().st_size > 0:
             try:
                 with open(records_csv_path, "r", encoding="utf-8") as f:
@@ -898,12 +904,12 @@ def main():
                         last_line_n = int(lines[-1].split(",")[0])
                         if last_line_n > 0:
                             resumed_n = last_line_n + 1
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[!] Warning: Failed to read records fallback from {records_csv_path}: {e}")
 
         if resumed_n is not None:
             args.start = resumed_n
-            print(f"[+] Resuming execution: starting at whole number {args.start:,}")
+            print(f"[+] Resuming execution: starting at whole number {format_huge_int(args.start)}")
         else:
             print("[*] No existing checkpoint found. Starting from beginning.")
 
@@ -911,7 +917,7 @@ def main():
         print("Error: Starting whole number must be >= 1.")
         sys.exit(1)
     if args.end is not None and args.end < args.start:
-        print(f"Error: Ending number ({args.end}) must be >= starting number ({args.start}).")
+        print(f"Error: Ending number ({format_huge_int(args.end)}) must be >= starting number ({format_huge_int(args.start)}).")
         sys.exit(1)
     if args.csv_limit < 1:
         print("Error: CSV limit must be >= 1.")
@@ -933,7 +939,7 @@ def main():
     print(f"[*] Option A CSV (Top):     {csv_path} (limit: {args.csv_limit:,})")
     print(f"[*] Option B CSV (Records): {records_csv_path} (unlimited record-breakers)")
     print(f"[*] Checkpoint File:        {checkpoint_path}")
-    print(f"[*] Range:                  {args.start} -> {'Infinity' if args.end is None else f'{args.end:,}'}")
+    print(f"[*] Range:                  {format_huge_int(args.start)} -> {'Infinity' if args.end is None else format_huge_int(args.end)}")
     print(f"[*] Batch Size:             {args.batch_size:,}")
     print("[*] Launching Real-Time Monitor...\n")
 
