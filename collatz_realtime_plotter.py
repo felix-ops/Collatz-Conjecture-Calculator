@@ -166,7 +166,7 @@ class RealTimeCollatzRunner:
         self.end_num = end_num
         self.csv_path = csv_path
         self.checkpoint_path = checkpoint_path or (self.csv_path.parent / "collatz_checkpoint.txt")
-        self.batch_size = max(100, batch_size)
+        self.batch_size = max(1, batch_size)
         self.csv_limit = max(1, csv_limit)
 
         # Threading controls
