@@ -66,7 +66,6 @@ cl /O2 /Oi /Ot /openmp /std:c++20 /LD cpp/collatz_dll.cpp /Fe:collatz.dll
 
 ### 1. One-Click Batch Files (Windows)
 - **`run.bat`**: Automatically checks for an existing checkpoint. If found, it resumes from where you left off; otherwise, it starts from $n = 1$.
-- **`resume.bat`**: Explicitly resumes execution from the last evaluated number in `collatz_checkpoint.txt`.
 
 ### 2. Python CLI Commands
 
