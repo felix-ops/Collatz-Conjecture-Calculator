@@ -1,6 +1,7 @@
 # Collatz Conjecture High-Speed Engine & Real-Time Monitor
 
 A high-performance, multithreaded engine and live terminal monitor for exploring the **Collatz Conjecture** ($3n + 1$ problem). It combines an optimized C++ OpenMP shared library (`collatz.dll`) capable of evaluating **tens of millions of numbers per second** with a Python terminal HUD dashboard, state checkpointing, and dual CSV persistence.
+<img width="1057" height="672" alt="Screenshot 2026-09-22 163346" src="https://github.com/user-attachments/assets/9ec47184-856a-47a9-8f84-781f42eed0ea" />
 
 ---
 
